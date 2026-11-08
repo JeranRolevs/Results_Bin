@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.venv/
+.env
+.env.*
+raw/
+metadata/
+local-reference/
+*.edf
+*.npz
+*.npy
+*.log
