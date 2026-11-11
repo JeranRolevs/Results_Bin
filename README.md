@@ -1,7 +1,8 @@
 # Results Bin
 
-Curated experimental reports, protocols and offline tests.
+Central hub for curated tests, research and findings from Labtune and, potentially, other systems.
 
-- [SINDy-style anomaly/event detection — CAP EEG series](experiments/sindy-anomaly-detection/README.md)
+- [Labtune](Labtune/README.md) — research-system namespace.
+  - [Sindy](Labtune/Sindy/README.md) — SINDy-style anomaly/event detection studies.
 
-Each series carries its own licensing and data-attribution notices. Raw datasets, credentials and private research records are not stored here.
+Each series carries its own licensing, data attribution and execution-provenance statements. Raw datasets, credentials and private research records are not stored here.
