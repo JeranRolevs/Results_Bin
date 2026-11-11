@@ -11,6 +11,10 @@ Labtune (formerly Labton) is the research system for this programme. This direct
 
 **Do not compare AP across these rows as an improvement estimate:** representation and confirmation subjects changed. The matched relative-feature legacy recipe scored **0.2921** on the second study's same confirmation records. Tuning increased AP to **0.4162**, but deleted every lagged and nonlinear coefficient, leaving a static spectral-distance score. The linear-plus-sparse-residual family selected **zero correction**, exactly matching VAR at **0.4172**.
 
+## Native Labtune research follow-up
+
+[03 — Nonlinear dataset discovery](03-nonlinear-dataset-discovery/README.md) completed the native scientist workflow and produced a conditional Silverbox/hydraulics plan. No new numerical experiment or demonstrated nonlinear advantage resulted. [API and budget observations](../API-and-Budgets/README.md) describe the transport integration and operational tests.
+
 ## Contents
 
 - `01-cap-absolute-bandpower/`: published scientific protocol, curated findings, independently implemented evaluator kernels and five offline tests.
