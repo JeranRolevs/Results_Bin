@@ -14,6 +14,6 @@ The experiment adds opt-in OpenAI-format SSE streaming to Labtune's generation p
 - [CHANGELOG.md](CHANGELOG.md): curated provenance and disposition, not private trial logs.
 - [API findings](../../API-and-Budgets/README.md) and [scientist-workflow findings](../../Sindy/03-nonlinear-dataset-discovery/README.md): outcomes and scope limitations.
 
-The source was briefly committed upstream as `ed8ec75`. The user requested its removal from Labtune main and retention here until testing is sufficient. The intended upstream baseline is `d0f462a28bcc4267f8767316d8c73c3c72201063`; do not use the withdrawn commit as a dependency. Git hosting may retain old objects, so branch removal is not a promise of purging every cached historical object.
+The source was briefly committed upstream as `ed8ec75`. The user requested its removal from Labtune main and retention here until testing is sufficient. Labtune main was restored to the upstream baseline `d0f462a28bcc4267f8767316d8c73c3c72201063`; do not use the withdrawn commit as a dependency. Git hosting may retain old objects, so branch removal is not a promise of purging every cached historical object.
 
 No credentials, raw prompts, reasoning, trial outputs/journals, datasets, private freezes or audit archives are included. The patch and source snapshot contain implementation, offline fixtures and public documentation only. Full [LICENSE](LICENSE) and [LICENSING.md](LICENSING.md) are preserved unchanged: copyright Pioneertown B.V.; author Goran Mitevski.

@@ -12,6 +12,10 @@ Long research calls first encountered HTTP 502/504 failures. Lowering the comple
 4. Published curated API/budget and scientist-workflow reports in this hub. Implementation was briefly pushed to Labtune as ed8ec75.
 5. The user requested deferring upstream adoption until more testing. This folder now holds the implementation snapshot, complete patch and migration documentation. Removing ed8ec75 from Labtune main restores the exact baseline above; no later commits existed at the time this relocation was prepared.
 
+## Relocation completed
+
+The experimental implementation and documents were first pushed to Results_Bin in commit `646d6cc33b7e39740ae58c445e2e9c51702ee5cb`. Labtune main was then restored to `d0f462a28bcc4267f8767316d8c73c3c72201063` using a force-with-lease guard that required the remote tip to still be the withdrawn experimental commit. Remote branch state was checked afterward; no later commits were overwritten. Historical Git objects may remain cached by the host, as noted in README.md.
+
 ## Current disposition
 
 Experimental; canonical home is Results_Bin, not Labtune main. No package release, production-readiness claim, automatic resume or retry capability is implied. No new paid requests were made during relocation. See TESTING.md for what remains and MIGRATION.md for the approval-gated path back to Labtune.
