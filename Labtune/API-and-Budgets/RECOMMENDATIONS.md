@@ -1,5 +1,7 @@
 # Provisional API and budget guidance
 
+**Experimental implementation required:** these streaming settings are not supported by unmodified Labtune main. See the [deferred patch and migration guide](../Experiments/native-streaming-and-partial-output/README.md). Do not enable them in a baseline installation without explicitly applying and testing the patch.
+
 ## A tested configuration, not a universal default
 
 For the **user-selected Ethux qwen3.8-27b text-only workflow**, the following settings completed one full run:
@@ -36,7 +38,7 @@ The authorized two-hour test used a framework-required, intentionally nonbinding
 
 Treat `length`, absent final text, missing DONE/completion markers and interrupted streams as incomplete; never promote partial reasoning to a scientific finding. Record authoritative usage when supplied, and make missing receipts visible. Reject redirects carrying credentials and preserve private journals outside Git.
 
-The native patch preserves successful peer results when a sibling fails before wave aggregation. It does **not** implement automatic checkpoint/resume. Do not claim a new workflow is a resumed or independent scientific trial when it repeats earlier work. A future resume facility must preserve configuration, conversation state, actor/node identity and permitted peer exposure.
+The deferred experimental native patch preserves successful peer results when a sibling fails before wave aggregation. It does **not** implement automatic checkpoint/resume. Do not claim a new workflow is a resumed or independent scientific trial when it repeats earlier work. A future resume facility must preserve configuration, conversation state, actor/node identity and permitted peer exposure.
 
 One small paid probe may check connectivity only when authorized; it cannot qualify long agent workloads. Test the parser, HTTP path, usage accounting, redaction, incomplete-output handling and the full graph offline before live calls. All setup/tests/packaging should remain free of paid calls.
 

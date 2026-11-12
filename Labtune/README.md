@@ -3,6 +3,7 @@
 Central published research, tests and curated findings associated with [Labtune](https://github.com/JeranRolevs/labtune), formerly Labton.
 
 - [Sindy](Sindy/README.md): SINDy-style anomaly/event detection research and related numerical tests.
+- [Experiments](Experiments/README.md): proposed implementations kept outside Labtune until further testing and approval.
 - [API and budgets](API-and-Budgets/README.md): provider-call observations, native streaming tests and provisional operating guidance.
 
 This namespace identifies the research programme, not automatic provenance of every calculation. Each study must explicitly label Labtune-native scientist workflows, standalone numerical evaluation and independently verified evidence. A model-generated proposal is not an experimentally evaluated finding.

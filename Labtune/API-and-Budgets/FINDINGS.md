@@ -38,3 +38,7 @@ The documented streaming mode delivered reasoning events before the final answer
 - https://docs.ethux.net/models/ lists a 256K context and organization-specific pricing. Context length is not a completion-budget recommendation.
 
 No separate reasoning-budget/disable-thinking parameter was found in the checked documentation. No undocumented reasoning option was used. The origin of the gateway errors was not established. One successful full workflow does not establish optimal organization, model choice or production reliability.
+
+## Implementation disposition
+
+The tested implementation is retained in the [experimental folder](../Experiments/native-streaming-and-partial-output/README.md) pending further testing, not on Labtune main. Historical outcomes above remain unchanged; they used the locally patched build.

@@ -1,0 +1,519 @@
+diff --git a/docs/PROVIDERS.md b/docs/PROVIDERS.md
+index 6df843d..90a57ef 100644
+--- a/docs/PROVIDERS.md
++++ b/docs/PROVIDERS.md
+@@ -48,6 +48,16 @@ The default is max_tokens. Request options cannot override the model, messages,
+ output bound. Finite JSON options such as temperature and nested generation settings are
+ sent only when explicitly supplied; support for them depends on the selected service.
+ 
++Streaming is an explicit generation-provider choice: add `stream: true` to the
++provider mapping for an OpenAI-format server-sent event response. The default is
++`false`; `request_options` still cannot override it. Streaming preserves the same
++request/time budget and never enables retries or a model fallback. The adapter
++requires a completion reason and the stream's DONE terminator, keeps reasoning
++separate from final answer text, and retains authoritative usage when supplied.
++A `length` finish is incomplete even if reasoning consumed the entire allowance.
++Missing streaming usage remains missing, not zero cost. Stream progress metadata
++is observable without interpreting partial fragments as completed findings.
++
+ Model listing is optional. If your service exposes a compatible data / id listing, set
+ models_endpoint, for example /models, to have an explicit live check use it. Otherwise the
+ live check directly probes the chosen generation model without assuming a listing API exists.
+diff --git a/src/labtune/providers/chat.py b/src/labtune/providers/chat.py
+index cfad4dd..4ab2e98 100644
+--- a/src/labtune/providers/chat.py
++++ b/src/labtune/providers/chat.py
+@@ -37,7 +37,7 @@ def validate_request_options(value):
+ class ChatCompletionsClient(JSONClient):
+     def __init__(self, api_key, *, model, base_url, endpoint="/chat/completions",
+                  models_endpoint=None, provider_id="generation", timeout=90, max_tokens=1024,
+-                 max_output_field="max_tokens", max_parallel=3, request_options=None, **kwargs):
++                 max_output_field="max_tokens", max_parallel=3, request_options=None, stream=False, **kwargs):
+         super().__init__(api_key, base_url=base_url, provider_id=provider_id, timeout=timeout,
+                          max_parallel=max_parallel, **kwargs)
+         if not isinstance(model, str) or not model.strip():
+@@ -46,6 +46,9 @@ class ChatCompletionsClient(JSONClient):
+             raise ProviderError("configuration", "Output token limit must be a positive integer.")
+         if max_output_field not in {"max_tokens", "max_completion_tokens"}:
+             raise ProviderError("configuration", "Unsupported output-limit field.")
++        if not isinstance(stream, bool):
++            raise ProviderError("configuration", "stream must be boolean.")
++        self.stream = stream
+         self.model, self.endpoint = model, validate_endpoint(endpoint)
+         self.models_endpoint = validate_endpoint(models_endpoint) if models_endpoint is not None else None
+         self.max_tokens, self.max_output_field = max_tokens, max_output_field
+@@ -62,7 +65,7 @@ class ChatCompletionsClient(JSONClient):
+ 
+     async def generate(self, messages, *, budget_ref):
+         body = {**self.request_options, "model": self.model, "messages": list(messages),
+-                self.max_output_field: self.max_tokens, "stream": False}
++                self.max_output_field: self.max_tokens, "stream": self.stream}
+         result = await self.request("POST", self.endpoint, body)
+         choices = result.get("choices")
+         if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+diff --git a/src/labtune/providers/configuration.py b/src/labtune/providers/configuration.py
+index 84f0df5..da37f44 100644
+--- a/src/labtune/providers/configuration.py
++++ b/src/labtune/providers/configuration.py
+@@ -9,11 +9,11 @@ from .http import ProviderError, validate_base_url, validate_endpoint
+ def generation_settings(value):
+     required = {"base_url", "model", "api_key_env", "env_file", "timeout_seconds",
+                 "max_output_tokens", "max_parallel_requests"}
+-    optional = {"adapter", "endpoint", "models_endpoint", "max_output_field", "request_options"}
++    optional = {"adapter", "endpoint", "models_endpoint", "max_output_field", "request_options", "stream"}
+     if not isinstance(value, dict) or not required <= set(value) or set(value) - required - optional:
+         raise ProviderError("configuration", "Provider settings have missing or unknown fields; see docs/PROVIDERS.md.")
+     result = {"adapter": "chat_completions", "endpoint": "/chat/completions", "models_endpoint": None,
+-              "max_output_field": "max_tokens", **value}
++              "max_output_field": "max_tokens", "stream": False, **value}
+     if result["adapter"] != "chat_completions":
+         raise ProviderError("configuration", "Generation currently requires the chat_completions protocol.")
+     for name in ("model", "env_file"):
+@@ -34,6 +34,8 @@ def generation_settings(value):
+             raise ProviderError("configuration", "Provider count limits must be positive integers.")
+     if result["max_output_field"] not in {"max_tokens", "max_completion_tokens"}:
+         raise ProviderError("configuration", "Unsupported output-limit field.")
++    if not isinstance(result["stream"], bool):
++        raise ProviderError("configuration", "Provider stream setting must be boolean.")
+     result["request_options"] = validate_request_options(result.get("request_options"))
+     return result
+ 
+diff --git a/src/labtune/providers/http.py b/src/labtune/providers/http.py
+index 1ae8a3e..af0078b 100644
+--- a/src/labtune/providers/http.py
++++ b/src/labtune/providers/http.py
+@@ -3,6 +3,8 @@ from __future__ import annotations
+ 
+ import asyncio
+ from contextlib import AsyncExitStack
++from contextvars import ContextVar
++from http.client import HTTPException
+ import json
+ import math
+ import ipaddress
+@@ -13,6 +15,9 @@ import urllib.request
+ from uuid import uuid4
+ 
+ 
++STREAM_PROGRESS = ContextVar("provider_stream_progress", default=None)
++
++
+ class ProviderError(RuntimeError):
+     def __init__(self, kind, message, *, http_status=None):
+         super().__init__(message)
+@@ -85,6 +90,8 @@ class JSONClient:
+     def _http(self, method, path, body):
+         data = None if body is None else json.dumps(body, allow_nan=False).encode()
+         headers = {"Content-Type": "application/json"}
++        if body is not None and body.get("stream") is True:
++            headers["Accept"] = "text/event-stream"
+         if self._key:
+             headers["Authorization"] = "Bearer " + self._key
+         request = urllib.request.Request(
+@@ -92,6 +99,11 @@ class JSONClient:
+             headers=headers)
+         try:
+             with urllib.request.build_opener(_NoRedirect).open(request, timeout=self.timeout) as response:
++                if body is not None and body.get("stream") is True:
++                    if "text/event-stream" not in (response.headers.get("Content-Type") or ""):
++                        raise ProviderError("invalid_response", "Expected a server-sent event stream.")
++                    from .streaming import read_chat_stream
++                    return read_chat_stream(response, progress=STREAM_PROGRESS.get())
+                 raw = response.read(16 * 1024 * 1024 + 1)
+             if len(raw) > 16 * 1024 * 1024:
+                 raise ProviderError("invalid_response", "Provider response exceeds the local limit.")
+@@ -107,7 +119,7 @@ class JSONClient:
+             raise ProviderError(kinds.get(error.code, "http_error"),
+                                 self.provider_id + " returned HTTP " + str(error.code),
+                                 http_status=error.code) from None
+-        except (urllib.error.URLError, TimeoutError, OSError):
++        except (urllib.error.URLError, TimeoutError, OSError, HTTPException):
+             raise ProviderError("transport_uncertain", "Request failed or timed out; execution/billing may be unknown. No automatic retry.") from None
+         except (ValueError, UnicodeError):
+             raise ProviderError("invalid_response", "Provider returned invalid JSON.") from None
+@@ -131,6 +143,9 @@ class JSONClient:
+             metadata = {"request_id": request_id, "provider": self.provider_id,
+                         "path": path, "model": (body or {}).get("model")}
+             self._emit({"kind": "provider_request", **metadata, "request": body})
++            loop = asyncio.get_running_loop()
++            progress_token = STREAM_PROGRESS.set(lambda stats: loop.call_soon_threadsafe(
++                self._emit, {"kind": "provider_stream_progress", **metadata, **stats}))
+             try:
+                 result = await asyncio.to_thread(self._transport, method, path, body)
+                 if not isinstance(result, dict):
+@@ -147,3 +162,5 @@ class JSONClient:
+                              "http_status": error.http_status,
+                              "elapsed_seconds": time.monotonic() - started})
+                 raise
++            finally:
++                STREAM_PROGRESS.reset(progress_token)
+diff --git a/src/labtune/providers/streaming.py b/src/labtune/providers/streaming.py
+new file mode 100644
+index 0000000..3f9306f
+--- /dev/null
++++ b/src/labtune/providers/streaming.py
+@@ -0,0 +1,126 @@
++"""Bounded OpenAI-format SSE decoding. Stream fragments never imply completion."""
++from __future__ import annotations
++
++import json
++import time
++
++from .http import ProviderError
++
++
++def read_chat_stream(response, *, progress=None, byte_limit=16 * 1024 * 1024):
++    """Assemble choice zero, retaining reasoning separately and authoritative usage.
++
++    Require both a completion reason and the SSE DONE terminator. Return length-
++    limited responses intact so the chat layer can reject them *after* journaling
++    their token receipts. No connection, retry, model choice or inference occurs here.
++    """
++    started = time.monotonic()
++    fields, answer, reasoning = [], [], []
++    size = events = answer_size = reasoning_size = 0
++    first_event = first_answer = None
++    last_report = None
++    identity = model = finish = usage = None
++    done = False
++
++    def invalid(message):
++        raise ProviderError("invalid_response", message)
++
++    def report(force=False):
++        nonlocal last_report
++        now = time.monotonic()
++        if progress is not None and (force or last_report is None or now - last_report >= 5):
++            progress({"events": events, "received_bytes": size,
++                      "answer_characters": answer_size, "reasoning_characters": reasoning_size,
++                      "elapsed_seconds": now - started, "first_event_seconds": first_event,
++                      "first_answer_seconds": first_answer, "done": done,
++                      "usage_receipt_present": usage is not None})
++            last_report = now
++
++    def consume(payload):
++        nonlocal events, first_event, first_answer, identity, model, finish, usage
++        nonlocal answer_size, reasoning_size, done
++        if first_event is None:
++            first_event = time.monotonic() - started
++        if payload == "[DONE]":
++            done = True
++            report(force=True)
++            return
++        try:
++            value = json.loads(payload)
++            json.dumps(value, allow_nan=False)
++        except (ValueError, TypeError):
++            invalid("Stream event must contain finite JSON.")
++        if not isinstance(value, dict) or value.get("error") is not None:
++            invalid("Provider emitted an invalid or error stream event.")
++        events += 1
++        identity = value.get("id") or identity
++        model = value.get("model") or model
++        if value.get("usage") is not None:
++            if not isinstance(value["usage"], dict):
++                invalid("Stream usage must be an object.")
++            usage = value["usage"]
++        choices = value.get("choices", [])
++        if not isinstance(choices, list):
++            invalid("Invalid streaming choices.")
++        for choice in choices:
++            if not isinstance(choice, dict):
++                invalid("Invalid streaming choice.")
++            if choice.get("index", 0) != 0:
++                continue
++            delta = choice.get("delta", {})
++            if not isinstance(delta, dict):
++                invalid("Invalid streaming delta.")
++            text = delta.get("content")
++            if text is not None:
++                if not isinstance(text, str):
++                    invalid("Streaming content must be text.")
++                answer.append(text)
++                answer_size += len(text)
++                if first_answer is None and text.strip():
++                    first_answer = time.monotonic() - started
++            thought = delta.get("reasoning_content")
++            if thought is None:
++                thought = delta.get("reasoning")
++            if thought is not None:
++                if not isinstance(thought, str):
++                    invalid("Streaming reasoning must be text.")
++                reasoning.append(thought)
++                reasoning_size += len(thought)
++            if choice.get("finish_reason") is not None:
++                finish = choice["finish_reason"]
++        report()
++
++    while True:
++        line = response.readline(1024 * 1024 + 1)
++        if not line:
++            break
++        size += len(line)
++        if len(line) > 1024 * 1024 or size > byte_limit:
++            invalid("Provider stream exceeds the local byte limit.")
++        try:
++            line = line.decode("utf-8").rstrip("\r\n")
++        except UnicodeError:
++            invalid("Provider stream is not UTF-8.")
++        if not line:
++            if fields:
++                consume("\n".join(fields))
++                fields.clear()
++                if done:
++                    break
++        elif line.startswith("data:"):
++            text = line[5:]
++            fields.append(text[1:] if text.startswith(" ") else text)
++        # SSE comments, retry directives and event identifiers are not model text.
++    if not done:
++        invalid("Provider stream ended without its DONE terminator; response incomplete.")
++    if not isinstance(finish, str) or not finish:
++        invalid("Provider stream has no completion reason.")
++    result = {"id": identity, "model": model,
++              "choices": [{"index": 0, "message": {"role": "assistant", "content": "".join(answer),
++                             "reasoning_content": "".join(reasoning)}, "finish_reason": finish}],
++              "stream_metrics": {"events": events, "received_bytes": size,
++                                 "first_event_seconds": first_event,
++                                 "first_answer_seconds": first_answer, "done": done}}
++    if usage is not None:
++        result["usage"] = usage
++    return result
+diff --git a/src/labtune/resources/starter/project/docs/PROVIDERS.md b/src/labtune/resources/starter/project/docs/PROVIDERS.md
+index 6df843d..90a57ef 100644
+--- a/src/labtune/resources/starter/project/docs/PROVIDERS.md
++++ b/src/labtune/resources/starter/project/docs/PROVIDERS.md
+@@ -48,6 +48,16 @@ The default is max_tokens. Request options cannot override the model, messages,
+ output bound. Finite JSON options such as temperature and nested generation settings are
+ sent only when explicitly supplied; support for them depends on the selected service.
+ 
++Streaming is an explicit generation-provider choice: add `stream: true` to the
++provider mapping for an OpenAI-format server-sent event response. The default is
++`false`; `request_options` still cannot override it. Streaming preserves the same
++request/time budget and never enables retries or a model fallback. The adapter
++requires a completion reason and the stream's DONE terminator, keeps reasoning
++separate from final answer text, and retains authoritative usage when supplied.
++A `length` finish is incomplete even if reasoning consumed the entire allowance.
++Missing streaming usage remains missing, not zero cost. Stream progress metadata
++is observable without interpreting partial fragments as completed findings.
++
+ Model listing is optional. If your service exposes a compatible data / id listing, set
+ models_endpoint, for example /models, to have an explicit live check use it. Otherwise the
+ live check directly probes the chosen generation model without assuming a listing API exists.
+diff --git a/src/labtune/study.py b/src/labtune/study.py
+index aaafa38..98c80df 100644
+--- a/src/labtune/study.py
++++ b/src/labtune/study.py
+@@ -184,7 +184,7 @@ def client_for(config, key, **kwargs):
+     return ChatCompletionsClient(key, model=p["model"], base_url=p["base_url"], endpoint=p["endpoint"],
+         models_endpoint=p["models_endpoint"], timeout=p["timeout_seconds"], max_tokens=p["max_output_tokens"],
+         max_parallel=kwargs.pop("max_parallel", p["max_parallel_requests"]),
+-        max_output_field=p["max_output_field"], request_options=p["request_options"], **kwargs)
++        max_output_field=p["max_output_field"], request_options=p["request_options"], stream=p["stream"], **kwargs)
+ 
+ 
+ def prepare(project, workspace):
+@@ -753,11 +753,17 @@ initial tool, so do not claim those capabilities solved.
+                 results=await asyncio.gather(*[
+                     self.run_node_episode(node,actor)
+                     for node,actor in batch],return_exceptions=True)
++                failures = []
+                 for result in results:
+-                    if isinstance(result,BaseException):
+-                        raise result
+-                    if "output" in result:
++                    if isinstance(result, BaseException):
++                        failures.append(result)
++                    elif "output" in result:
+                         wave_outputs.append(result)
++                if failures:
++                    # Preserve successful peers from this dependency wave before
++                    # surfacing a sibling failure. This is not automatic resume.
++                    self.outputs.extend(wave_outputs)
++                    raise failures[0]
+             # A dependency wave sees one prior snapshot, regardless of finish order or resource width.
+             self.outputs.extend(wave_outputs)
+             for node in ready:
+diff --git a/tests/test_providers.py b/tests/test_providers.py
+index c531dd4..926ade7 100644
+--- a/tests/test_providers.py
++++ b/tests/test_providers.py
+@@ -151,6 +151,37 @@ class StudyTests(unittest.TestCase):
+         self.assertEqual(calls, ["/models", "/chat/completions", "/assess"])
+         self.assertFalse(result["research_started"])
+ 
++    def test_complete_native_workflow_uses_streamed_http_offline(self):
++        import io
++        config = fixture_config()
++        config["provider"]["stream"] = True
++        (self.root / "study.yaml").write_text(json.dumps(config))
++        (self.root / "mission/problem.md").write_text("Offline streamed workflow fixture.")
++        action = {"action": "final", "summary": "Unverified", "findings": [],
++                  "wisdom": [], "candidate_output": "Not measured."}
++        chunks = [{"choices": [{"index": 0, "delta": {"content": json.dumps(action)},
++                                "finish_reason": "stop"}]},
++                  {"choices": [], "usage": {"prompt_tokens": 3, "completion_tokens": 7}}]
++        data = ("".join("data: " + json.dumps(x) + "\n\n" for x in chunks) + "data: [DONE]\n\n").encode()
++        class Response(io.BytesIO):
++            headers = {"Content-Type": "text/event-stream"}
++        requests = []
++        class Opener:
++            def open(self, request, timeout):
++                requests.append(json.loads(request.data))
++                return Response(data)
++        with patch.dict(os.environ, {"LABTUNE_API_KEY": FAKE_KEY}), patch(
++                "labtune.providers.http.urllib.request.build_opener", return_value=Opener()):
++            result = asyncio.run(run_variant(PROJECT, self.root, "a-none"))
++        self.assertEqual(result["status"], "completed_text_workflow")
++        self.assertEqual(result["verification_status"], "not_evaluated")
++        self.assertTrue(all(x["stream"] for x in requests))
++        self.assertEqual(result["provider_post_requests"], len(requests))
++        self.assertEqual(result["usage"]["chat_output_tokens"], 7 * len(requests))
++        journal = (self.root / "trials" / result["trial_id"] / "events.jsonl").read_text()
++        self.assertIn("provider_stream_progress", journal)
++        self.assertNotIn(FAKE_KEY, journal)
++
+     def test_real_workflow_structure_runs_with_fake_responses_and_never_verifies_proposals(self):
+         (self.root / "mission/problem.md").write_text("Offline fixture: propose a reversible improvement.")
+         def transport(client, method, path, body):
+diff --git a/tests/test_streaming.py b/tests/test_streaming.py
+new file mode 100644
+index 0000000..12a0360
+--- /dev/null
++++ b/tests/test_streaming.py
+@@ -0,0 +1,135 @@
++"""Offline native SSE, transport and partial-wave regression checks."""
++import asyncio
++import io
++import json
++from unittest import TestCase
++from unittest.mock import patch
++
++from labtune.providers.streaming import read_chat_stream
++from labtune.providers.http import ProviderError
++from labtune.providers.chat import ChatCompletionsClient
++from labtune.providers.configuration import generation_settings
++from labtune.study import TextStudy, StudyError
++
++
++def event(content=None, thought=None, finish=None, index=0):
++    delta = {}
++    if content is not None:
++        delta["content"] = content
++    if thought is not None:
++        delta["reasoning_content"] = thought
++    return {"id": "offline-id", "model": "offline-model", "choices": [
++        {"index": index, "delta": delta, "finish_reason": finish}]}
++
++
++def wire(*values, done=True):
++    text = ": heartbeat\n\n" + "".join("data: " + json.dumps(v) + "\r\n\r\n" for v in values)
++    return (text + ("data: [DONE]\n\n" if done else "")).encode()
++
++
++class StreamingTests(TestCase):
++    def test_reasoning_answer_usage_and_empty_delta_timing(self):
++        progress = []
++        data = wire(event(content=""), event(thought="private thought"), event("answer"),
++                    event(finish="stop"), {"choices": [], "usage": {"completion_tokens": 20}})
++        result = read_chat_stream(io.BytesIO(data), progress=progress.append)
++        self.assertEqual(result["choices"][0]["message"]["content"], "answer")
++        self.assertEqual(result["choices"][0]["message"]["reasoning_content"], "private thought")
++        self.assertEqual(result["usage"]["completion_tokens"], 20)
++        self.assertIsNone(progress[0]["first_answer_seconds"])
++        self.assertIsNotNone(progress[-1]["first_answer_seconds"])
++        self.assertNotIn("private thought", json.dumps(progress))
++
++    def test_length_retains_authoritative_receipt_before_chat_rejects(self):
++        result = read_chat_stream(io.BytesIO(wire(event(thought="thinking"), event(finish="length"),
++                    {"choices": [], "usage": {"completion_tokens": 8}})))
++        self.assertEqual(result["usage"]["completion_tokens"], 8)
++        journal = []
++        client = ChatCompletionsClient(None, model="fixture", base_url="https://fixture.invalid", stream=True,
++                                      transport=lambda *args: result, on_event=journal.append)
++        with self.assertRaises(ProviderError) as caught:
++            asyncio.run(client.generate([{"role": "user", "content": "offline"}], budget_ref="test"))
++        self.assertEqual(caught.exception.kind, "output_limit")
++        self.assertEqual(journal[-1]["kind"], "provider_response")
++
++    def test_disconnect_missing_finish_error_nonfinite_and_empty_answer(self):
++        bad = [wire(event("partial", finish="stop"), done=False), wire(event("no finish")),
++               wire({"error": {"message": "failure"}}), wire({"bad": float("nan")})]
++        for value in bad:
++            with self.subTest(value=value), self.assertRaises(ProviderError):
++                read_chat_stream(io.BytesIO(value))
++        empty = read_chat_stream(io.BytesIO(wire(event(thought="only thought", finish="stop"))))
++        client = ChatCompletionsClient(None, model="fixture", base_url="https://fixture.invalid", stream=True,
++                                      transport=lambda *args: empty)
++        with self.assertRaises(ProviderError):
++            asyncio.run(client.generate([{"role": "user", "content": "offline"}], budget_ref="test"))
++
++    def test_missing_usage_not_invented_and_other_choice_ignored(self):
++        result = read_chat_stream(io.BytesIO(wire(event("wrong", index=1), event("right", finish="stop"))))
++        self.assertNotIn("usage", result)
++        self.assertEqual(result["choices"][0]["message"]["content"], "right")
++
++    def test_bounds_and_unicode(self):
++        value = wire(event("café", finish="stop"))
++        self.assertEqual(read_chat_stream(io.BytesIO(value))["choices"][0]["message"]["content"], "café")
++        with self.assertRaises(ProviderError):
++            read_chat_stream(io.BytesIO(value), byte_limit=5)
++        with self.assertRaises(ProviderError):
++            read_chat_stream(io.BytesIO(b"data: \xff\n\n"))
++
++    def test_multiline_sse(self):
++        value = b'data: {"choices": [{"delta": {"content":"OK"},\ndata: "finish_reason":"stop"}]}\n\ndata: [DONE]\n\n'
++        self.assertEqual(read_chat_stream(io.BytesIO(value))["choices"][0]["message"]["content"], "OK")
++
++    def test_opt_in_stream_is_in_native_body_and_configuration(self):
++        config = {"base_url": "https://fixture.invalid", "model": "fixture", "api_key_env": None,
++                  "env_file": ".env", "timeout_seconds": 1, "max_output_tokens": 10,
++                  "max_parallel_requests": 1}
++        self.assertFalse(generation_settings(config)["stream"])
++        self.assertTrue(generation_settings(dict(config, stream=True))["stream"])
++        for v in [1, "true", None]:
++            with self.assertRaises(ProviderError):
++                generation_settings(dict(config, stream=v))
++        bodies = []
++        def transport(method, path, body):
++            bodies.append(body)
++            return read_chat_stream(io.BytesIO(wire(event("OK", finish="stop"))))
++        client = ChatCompletionsClient(None, model="fixture", base_url="https://fixture.invalid",
++                                      stream=True, transport=transport)
++        self.assertEqual(asyncio.run(client.generate([{"role": "user", "content": "offline"}],
++                                                    budget_ref="test"))["content"], "OK")
++        self.assertTrue(bodies[0]["stream"])
++
++    def test_actual_http_path_is_mocked_not_network_and_redacts_key(self):
++        class Response(io.BytesIO):
++            headers = {"Content-Type": "text/event-stream"}
++        calls = []
++        class Opener:
++            def open(self, request, timeout):
++                calls.append(json.loads(request.data))
++                return Response(wire(event("OFFLINE-SECRET", finish="stop"),
++                                     {"usage": {"prompt_tokens": 2}, "choices": []}))
++        events = []
++        client = ChatCompletionsClient("OFFLINE-SECRET", model="fixture", base_url="https://fixture.invalid",
++                                      stream=True, on_event=events.append)
++        with patch("labtune.providers.http.urllib.request.build_opener", return_value=Opener()):
++            asyncio.run(client.generate([{"role": "user", "content": "offline"}], budget_ref="test"))
++        self.assertEqual(len(calls), 1)
++        self.assertTrue(any(e["kind"] == "provider_stream_progress" for e in events))
++        self.assertNotIn("OFFLINE-SECRET", json.dumps(events))
++
++    def test_successful_wave_sibling_survives_failure(self):
++        study = object.__new__(TextStudy)
++        study.plan = {"resources": {"max_active_agents": 2}, "work_graph": [
++            {"id": "phase", "kind": "episode", "depends_on": [],
++             "research_activity": "allowed", "actors": ["ok", "fail"]}]}
++        study.outputs = []
++        study.event = lambda value: None
++        async def episode(node, actor):
++            if actor == "fail":
++                raise StudyError("offline sibling failure")
++            return {"actor": actor, "output": {"summary": "saved"}}
++        study.run_node_episode = episode
++        with self.assertRaises(StudyError):
++            asyncio.run(study.run_graph())
++        self.assertEqual([x["actor"] for x in study.outputs], ["ok"])
